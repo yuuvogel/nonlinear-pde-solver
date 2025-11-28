@@ -1,0 +1,166 @@
+// --- Improved Solver: Hybrid Method ---
+// Logic is strictly identical to the original code.
+
+// Constants
+real TOL = 1e-6; 
+int maxIter = 10; 
+int maxIterN = 1000;
+
+// Output Setup
+string outputDir = "./results_improved/";
+string logPath = outputDir + "convergence_hybrid.csv";
+ofstream lambdaFile(logPath);
+lambdaFile << "Iteration,Lambda,J,g" << endl;
+
+// GIF用の通し番号カウンタ
+int totalIter = 0;
+
+// Geometry
+border C1(t=0, 1){x=t; y=0; label=1;}
+border C2(t=0, 1){x=1; y=t; label=1;}
+border C3(t=0, 1){x=1-t; y=1; label=1;}
+border C4(t=0, 1){x=0; y=1-t; label=1;}
+
+border H1(t=0, 1){x=0.375+0.125*t; y=0.375; label=2;}
+border H2(t=0, 1){x=0.5+0.125*t; y=0.375+0.125*t; label=2;}
+border H3(t=0, 1){x=0.625; y=0.5+0.125*t; label=2;}
+border H4(t=0, 1){x=0.625-0.125*t; y=0.625; label=2;}
+border H5(t=0, 1){x=0.5-0.125*t; y=0.625-0.125*t; label=2;}
+border H6(t=0, 1){x=0.375; y=0.5-0.125*t; label=2;}
+
+int nn = 128; // 64 -> 128 (Baselineと合わせるため。元に戻したければ64にしてください)
+mesh Thsquare = square(nn, nn, [x, y]);
+
+real[int] hx = [0.375, 0.5, 0.625, 0.625, 0.5, 0.375];
+real[int] hy = [0.375, 0.375, 0.5, 0.625, 0.625, 0.5];
+
+func int isInsideHexagon(real xx, real yy) {
+    int crossings = 0;
+    int n = hx.n;
+    for (int i = 0; i < n; ++i) {
+        real xx1 = hx[i];
+        real yy1 = hy[i];
+        real xx2 = hx[(i+1)%n];
+        real yy2 = hy[(i+1)%n];
+        
+        if (((yy1 <= yy && yy < yy2) || (yy2 <= yy && yy < yy1)) &&
+            (xx < (xx2 - xx1) * (yy - yy1) / (yy2 - yy1 + 1e-10) + xx1)) {
+            crossings += 1;
+        }
+    }
+    return crossings % 2;
+}
+
+mesh Th = trunc(Thsquare, (1 - isInsideHexagon(x, y)), label=10);
+
+fespace Vh(Th, P1);
+Vh uh, vh, uk1, du, v; // u, v removed (duplicate warning), using du, v
+
+uh = 1.0;
+uk1 = uh;
+
+// ==========================================
+// Phase 1: Scaling Method
+// ==========================================
+real error = 1.0;
+int iter = 0;
+
+cout << "--- Phase 1: Scaling ---" << endl;
+
+while (error > TOL && iter < maxIter) {
+    // Problem definition
+    problem sl(uh, vh, solver=UMFPACK)
+        = int2d(Th)(dx(uh) * dx(vh) + dy(uh) * dy(vh)) 
+        - int2d(Th)((exp(uk1)-1-uk1) * vh) 
+        + on(C1,C2,C3,C4,H1,H2,H3,H4,H5,H6, uh=0);
+    sl;
+
+    real lambda = 1.0; 
+
+    // Function definition MUST be inside loop (Original Logic)
+    func real f(real lambda) {
+        return int2d(Th)((exp(lambda*uh)-1-lambda*uh)* uh/lambda )
+            - int2d(Th)(dx(uh)^2 + dy(uh)^2);
+    }
+
+    func real df(real lambda) {
+        return int2d(Th)(((exp(lambda*uh))*(lambda*uh-1)+1)*uh/(lambda^2));
+    }
+
+    for (int i = 0; i < 1000; i++) { // maxIterN
+        real delta = f(lambda) / df(lambda);
+        lambda -= delta;
+        if (abs(delta) < TOL) break;
+    }
+    
+    uh = uh * lambda;
+    
+    real J =int2d(Th)((dx(uh)^2 + dy(uh)^2) / 2) - int2d(Th)(exp(uh)-uh-uh^2);
+    real g = int2d(Th)(dx(uh)^2 + dy(uh)^2) - int2d(Th)((exp(uh)-1-uh) * uh);
+
+    lambdaFile.precision(10);
+    lambdaFile << iter << "," << abs(1-lambda) << "," << J << "," << g << "\n";
+
+    error = sqrt(int2d(Th)((uh - uk1)^2));
+    uk1 = uh;
+
+    iter++;
+    totalIter++;
+    cout << "Iteration " << iter << ", Error: " << error << endl;
+
+    // Output for GIF (Added)
+    string solPath = outputDir + "solution_" + totalIter + ".csv";
+    ofstream sol(solPath);
+    for(int i=0; i<Th.nv; i++) sol << Th(i).x << "," << Th(i).y << "," << uh[][i] << endl;
+}
+
+
+// ==========================================
+// Phase 2: Newton's Method
+// ==========================================
+real error2 = 1.0;
+int iter2 = 0;
+real lambda2 = 1.0; // dummy for log
+
+cout << "--- Phase 2: Newton ---" << endl;
+
+while (error2 > TOL && iter2 < maxIterN) {
+    
+    solve F(du, v, solver=UMFPACK)
+        = int2d(Th)(dx(du) * dx(v) + dy(du) * dy(v)) 
+        - int2d(Th)((exp(uh)-1) * du * v)
+        + int2d(Th)(dx(uh) * dx(v) + dy(uh) * dy(v))   
+        - int2d(Th)((exp(uh)-1-uh) * v)
+        + on(C1,C2,C3,C4,H1,H2,H3,H4,H5,H6, du=0);
+
+    uh[] += du[];
+    error2 = du[].linfty;
+
+    cout << "Iteration " << iter2 << ", Error: " << error2 << endl;
+
+    real J =int2d(Th)((dx(uh)^2 + dy(uh)^2) / 2) - int2d(Th)(exp(uh)-uh-uh^2);
+    real g = int2d(Th)(dx(uh)^2 + dy(uh)^2) - int2d(Th)((exp(uh)-1-uh) * uh);
+
+    lambdaFile << (iter + iter2) << "," << abs(1-lambda2) << "," << J << "," << g << "\n";
+
+    if (error2 > 1e10) {
+        cout << "Blow-up detected." << endl;
+        break;
+    }
+
+    iter2++;
+    totalIter++;
+
+    // Output for GIF (Added)
+    string solPath = outputDir + "solution_" + totalIter + ".csv";
+    ofstream sol(solPath);
+    for(int i=0; i<Th.nv; i++) sol << Th(i).x << "," << Th(i).y << "," << uh[][i] << endl;
+}
+
+
+// Final Output
+string finalPath = outputDir + "solution_final.csv";
+ofstream solFinal(finalPath);
+for(int i=0; i<Th.nv; i++) solFinal << Th(i).x << "," << Th(i).y << "," << uh[][i] << endl;
+
+cout << "Total Iterations: " << totalIter << endl;
