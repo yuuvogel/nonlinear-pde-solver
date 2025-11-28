@@ -13,11 +13,13 @@ TARGETS = [
     {
         "name": "baseline",
         "input_dir": "./results_baseline/",
+        "tri_file": "mesh_tri.csv", # メッシュ情報
         "output_gif": "baseline_demo.gif"
     },
     {
         "name": "improved",
         "input_dir": "./results_improved/",
+        "tri_file": "mesh_tri.csv", # メッシュ情報
         "output_gif": "improved_demo.gif"
     }
 ]
@@ -31,6 +33,7 @@ def get_iteration_from_filename(fname):
 def create_animation(target):
     name = target["name"]
     input_dir = target["input_dir"]
+    tri_file = target["tri_file"]
     output_gif = target["output_gif"]
 
     print(f"--- Processing: {name} ---")
@@ -39,27 +42,45 @@ def create_animation(target):
         print(f"Skipping {name}: Directory {input_dir} not found.")
         return
 
+    # ファイル検索
     search_path = os.path.join(input_dir, FILE_PATTERN)
     file_list = glob.glob(search_path)
-    
-    # 数値順にソート
     file_list = [f for f in file_list if get_iteration_from_filename(f) != -1]
     file_list.sort(key=get_iteration_from_filename)
     
     if not file_list:
-        print(f"Skipping {name}: No csv files found in {input_dir}")
+        print(f"Skipping {name}: No csv files found.")
         return
 
-    print(f"Found {len(file_list)} files. Generating GIF...")
+    # メッシュ情報の読み込み
+    tri_path = os.path.join(input_dir, tri_file)
+    if not os.path.exists(tri_path):
+        print(f"Skipping {name}: Mesh file {tri_path} not found.")
+        return
+    
+    try:
+        # 0-based indexの三角形リスト
+        triangles = pd.read_csv(tri_path, header=None).values.astype(int)
+    except Exception as e:
+        print(f"Error reading mesh file: {e}")
+        return
+
+    print(f"Found {len(file_list)} frames. Generating GIF...")
 
     # データ読み込み
     z_values_list = []
     
-    # 最初のファイルでメッシュ作成
-    first_data = pd.read_csv(file_list[0], header=None).values
-    x = first_data[:, 0]
-    y = first_data[:, 1]
-    tri = mtri.Triangulation(x, y)
+    # 最初のファイルで座標取得
+    try:
+        first_data = pd.read_csv(file_list[0], header=None).values
+        x = first_data[:, 0]
+        y = first_data[:, 1]
+    except Exception as e:
+        print(f"Error reading data: {e}")
+        return
+
+    # 正しい三角形分割を作成 (trianglesを指定することで穴が開く)
+    tri = mtri.Triangulation(x, y, triangles=triangles)
 
     for fname in file_list:
         df = pd.read_csv(fname, header=None).values
@@ -89,7 +110,7 @@ def create_animation(target):
     ani = animation.FuncAnimation(fig, update_plot, frames=len(file_list), interval=300)
     ani.save(output_gif, writer='pillow', fps=4)
     print(f"Saved: {output_gif}")
-    plt.close(fig) # メモリ解放
+    plt.close(fig)
 
 def main():
     for target in TARGETS:
