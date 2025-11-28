@@ -1,0 +1,144 @@
+// --- Baseline Solver for Semilinear Elliptic Equation ---
+// Based on Master's Thesis Research
+// Refactored for GitHub publication
+
+// Constants
+real TOL = 1e-6;      // Tolerance
+int maxIter = 100;    // Maximum iterations (Safety limit)
+int maxIterN = 1000;  // Maximum iterations for Newton's
+
+// 外側の正方形の境界
+border C1(t=0, 1){x=t; y=0; label=1;}
+border C2(t=0, 1){x=1; y=t; label=1;}
+border C3(t=0, 1){x=1-t; y=1; label=1;}
+border C4(t=0, 1){x=0; y=1-t; label=1;}
+
+// 内側の正方形（穴）の境界
+border H1(t=0, 1){x=0.375+0.125*t; y=0.375; label=2;}
+border H2(t=0, 1){x=0.5+0.125*t; y=0.375+0.125*t; label=2;}
+border H3(t=0, 1){x=0.625; y=0.5+0.125*t; label=2;}
+border H4(t=0, 1){x=0.625-0.125*t; y=0.625; label=2;}
+border H5(t=0, 1){x=0.5-0.125*t; y=0.625-0.125*t; label=2;}
+border H6(t=0, 1){x=0.375; y=0.5-0.125*t; label=2;}
+
+// 正方メッシュの生成
+int nn = 128;
+mesh Thsquare = square(nn, nn, [x, y]);
+
+// 六角形の頂点座標
+real[int] hx = [0.375, 0.5, 0.625, 0.625, 0.5, 0.375];
+real[int] hy = [0.375, 0.375, 0.5, 0.625, 0.625, 0.5];
+
+// 六角形の内包判定関数
+func int isInsideHexagon(real xx, real yy) {
+    int crossings = 0;
+    int n = hx.n;
+    for (int i = 0; i < n; ++i) {
+        real xx1 = hx[i];
+        real yy1 = hy[i];
+        real xx2 = hx[(i+1)%n];
+        real yy2 = hy[(i+1)%n];
+        
+        if (((yy1 <= yy && yy < yy2) || (yy2 <= yy && yy < yy1)) &&
+            (xx < (xx2 - xx1) * (yy - yy1) / (yy2 - yy1 + 1e-10) + xx1)) {
+            crossings += 1;
+        }
+    }
+    return crossings % 2;
+}
+
+// 六角形の穴を除去する
+mesh Th = trunc(Thsquare, (1 - isInsideHexagon(x, y)), label=10);
+
+// Define function space
+fespace Vh(Th, P1); 
+Vh uh, vh, uk1;
+
+// Set initial condition
+uh = 1.0;
+uk1 = uh;
+
+// --- Output Settings ---
+string outputDir = "./results_baseline/"; // ← ここを修正
+string lambdaPath = outputDir + "convergence_log.csv";
+
+// Iterative computation
+real error = 1.0;
+int iter = 0;
+
+// output
+string triPath = outputDir + "mesh_tri.csv";
+ofstream tri(triPath);
+for(int i=0;i<Th.nt;i++){
+    tri << Th[i][0] << "," << Th[i][1] << "," << Th[i][2] << endl;
+}
+
+while (error > TOL && iter < maxIterN) {
+    // Define the nonlinear equation
+    problem sl(uh, vh, solver=UMFPACK)
+        = int2d(Th)(dx(uh) * dx(vh) + dy(uh) * dy(vh))  
+        - int2d(Th)((exp(uk1)-1-uk1) * vh)              
+        + on(C1,C2,C3,C4,H1,H2,H3,H4,H5,H6, uh=0);      
+
+    // Solve the problem
+    sl;
+    
+    real lambda = 1.0; 
+
+    // Normalize with a scaling factor
+    func real f(real lambda) {
+        return int2d(Th)((exp(lambda*uh)-1-lambda*uh)* uh/lambda )
+            - int2d(Th)(dx(uh)^2 + dy(uh)^2);
+    }
+
+    func real df(real lambda) {
+        return int2d(Th)(((exp(lambda*uh))*(lambda*uh-1)+1)*uh/(lambda^2));
+    }
+
+    // Newton's method
+    for (int i = 0; i < maxIterN; i++) {
+        real delta = f(lambda) / df(lambda);
+        lambda -= delta;
+        if (abs(delta) < TOL) break;
+    }
+    
+    uh = uh * lambda;
+    
+    real J =int2d(Th)((dx(uh)^2 + dy(uh)^2) / 2) - int2d(Th)(exp(uh)-uh-uh^2);
+    real g = int2d(Th)(dx(uh)^2 + dy(uh)^2) - int2d(Th)((exp(uh)-1-uh) * uh);
+
+    error = sqrt(int2d(Th)((uh - uk1)^2));
+    
+    // lambdaFile.precision(10);
+    // lambdaFile << iter << "," << abs(1-lambda) << "," << J << "," << g << "," << abs(g) << "\n";
+
+    uk1 = uh;
+    iter += 1;
+    cout << "Iteration " << iter << ", Error: " << error << endl;
+
+    // --- 出力設定の変更 (Modified) ---
+    // 1. iterが1の場合 (最初の一歩) ← 追加！
+    // 2. iterが10以下なら、偶数回(2,4,6...)
+    // 3. iterが10を超えたら、50回に1回(50, 100...)
+    bool isFirst = (iter == 1);
+    bool isEarlyPhase = (iter <= 10 && iter % 2 == 0);
+    bool isStablePhase = (iter > 10 && iter % 50 == 0);
+
+    if (isFirst || isEarlyPhase || isStablePhase) {
+        string solPath2 = outputDir + "solution_" + iter + ".csv";
+        ofstream sol(solPath2);
+        for(int i=0; i<Th.nv; i++){
+            sol << Th(i).x << "," << Th(i).y << "," << uh[][i] << endl;
+        }
+        cout << " >> Saved solution at iteration " << iter << endl;
+    }
+}
+
+// Final output
+string solPath = outputDir + "solution_final.csv";
+ofstream sol(solPath);
+for(int i=0;i<Th.nv;i++){
+    sol << Th(i).x << "," << Th(i).y << "," << uh[][i] << endl;
+}
+
+cout << "Computation Finished." << endl;
